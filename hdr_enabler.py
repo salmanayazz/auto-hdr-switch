@@ -3,12 +3,14 @@ import os
 import subprocess
 import sys
 import threading
+import tkinter as tk
 import winreg
 
 import pystray
 from PIL import Image, ImageDraw
 
 import config
+import gui
 import shortcuts
 import steam
 
@@ -65,6 +67,17 @@ def sync(*_):
     shortcuts.sync(steam.installed_games(), cfg["hide_steam_shortcuts"])
 
 
+def pin_to_start(icon, item):
+    def work():
+        try:
+            import pin_ui
+            p, s = pin_ui.pin_all()
+            icon.notify(f"Pinned {p} shortcut(s), {s} already pinned.", "Steam HDR Enabler")
+        except Exception as e:
+            icon.notify(f"Pinning failed: {e}", "Steam HDR Enabler")
+    threading.Thread(target=work, daemon=True).start()
+
+
 def toggle_hide(icon, item):
     cfg["hide_steam_shortcuts"] = not cfg["hide_steam_shortcuts"]
     config.save(cfg)
@@ -80,15 +93,18 @@ def game_menu(g):
 def menu():
     games = pystray.Menu(lambda: (game_menu(g) for g in steam.installed_games()))
     return pystray.Menu(
+        pystray.MenuItem("Open settings window", request_open, default=True),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem("Enable HDR on launch (default)", setter("hdr_on_launch"), checked=lambda i: cfg["hdr_on_launch"]),
         pystray.MenuItem("Disable HDR when game quits", setter("hdr_off_on_exit"), checked=lambda i: cfg["hdr_off_on_exit"]),
         pystray.MenuItem("Per-game settings", games),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Hide Steam's own shortcuts", toggle_hide, checked=lambda i: cfg["hide_steam_shortcuts"]),
         pystray.MenuItem("Sync Start Menu shortcuts now", sync),
+        pystray.MenuItem("Pin shortcuts to Start (takes over keyboard briefly)", pin_to_start),
         pystray.MenuItem("Run at startup", toggle_autostart, checked=lambda i: autostart_on()),
         pystray.MenuItem("Windows HDR settings", lambda *_: os.startfile("ms-settings:display-hdr")),
-        pystray.MenuItem("Quit", lambda icon, item: (stop.set(), icon.stop())))
+        pystray.MenuItem("Quit", quit_app))
 
 
 def sync_loop():
@@ -100,6 +116,42 @@ def sync_loop():
         stop.wait(60)
 
 
+open_req = threading.Event()
+
+
+def request_open(*_):
+    open_req.set()
+
+
+def quit_app(icon, item):
+    stop.set()
+    icon.stop()
+
+
 if __name__ == "__main__":
     threading.Thread(target=sync_loop, daemon=True).start()
-    pystray.Icon("hdr-enabler", icon_image(), "Steam HDR Enabler", menu()).run()
+    icon = pystray.Icon("hdr-enabler", icon_image(), "Steam HDR Enabler", menu())
+    icon.run_detached()
+
+    root = tk.Tk()
+    root.withdraw()
+    settings = gui.Settings(root, cfg, steam.installed_games, {
+        "hide": shortcuts.hide_originals,
+        "sync": lambda: threading.Thread(target=sync, daemon=True).start(),
+        "pin": lambda: pin_to_start(icon, None),
+        "hdr_settings": lambda: os.startfile("ms-settings:display-hdr"),
+        "autostart_on": autostart_on,
+        "toggle_autostart": toggle_autostart,
+    })
+
+    def poll():  # tray callbacks run on other threads; Tk is only touched here
+        if stop.is_set():
+            root.destroy()
+            return
+        if open_req.is_set():
+            open_req.clear()
+            settings.show()
+        root.after(150, poll)
+
+    root.after(150, poll)
+    root.mainloop()
